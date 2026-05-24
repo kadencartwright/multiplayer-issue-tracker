@@ -1,0 +1,17 @@
+services:
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: multiplayer-issue-tracker-rustfs
+    command: /data
+    environment:
+      RUSTFS_ACCESS_KEY: local-dev-access-key
+      RUSTFS_SECRET_KEY: local-dev-secret-key
+      RUSTFS_CONSOLE_ENABLE: "true"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - rustfs-data:/data
+
+volumes:
+  rustfs-data:

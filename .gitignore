@@ -1,0 +1,8 @@
+node_modules
+.turbo
+dist
+.output
+.env
+.env.local
+.DS_Store
+coverage

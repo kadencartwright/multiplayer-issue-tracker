@@ -1,0 +1,9 @@
+{
+	"ignorePatterns": [
+		"apps/web/convex/_generated/**",
+		"apps/web/src/routeTree.gen.ts"
+	],
+	"health": {
+		"ignore": ["apps/web/src/routes/index.tsx"]
+	}
+}

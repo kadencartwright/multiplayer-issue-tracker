@@ -1,0 +1,23 @@
+[tools]
+node = "22.21.1"
+pnpm = "10.28.1"
+
+[tasks.install]
+description = "Install workspace dependencies"
+run = "pnpm install"
+
+[tasks.dev]
+description = "Run the local Convex backend, RustFS, and web app"
+run = "pnpm dev"
+
+[tasks.convex]
+description = "Run Convex against a local dev deployment"
+run = "pnpm --filter web convex:dev"
+
+[tasks.rustfs]
+description = "Start local RustFS object storage"
+run = "docker compose up -d rustfs"
+
+[tasks.check]
+description = "Run Biome, Vitest, and Fallow quality gates"
+run = "pnpm lint && pnpm test && pnpm fallow"
