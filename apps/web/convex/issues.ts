@@ -38,6 +38,7 @@ export const list = query({
 			.order("desc")
 			.collect()
 		const attachments = await ctx.db.query("attachments").collect()
+		const comments = await ctx.db.query("comments").collect()
 
 		return {
 			columns,
@@ -46,6 +47,9 @@ export const list = query({
 				attachments: attachments.filter(
 					(attachment) => attachment.issueId === issue._id,
 				),
+				comments: comments
+					.filter((comment) => comment.issueId === issue._id)
+					.sort((a, b) => a.createdAt - b.createdAt),
 			})),
 		}
 	},
@@ -61,6 +65,18 @@ export const createColumn = mutation({
 			order: columns.length,
 			createdAt: Date.now(),
 		})
+	},
+})
+
+export const renameColumn = mutation({
+	args: {
+		sessionToken: v.string(),
+		columnId: v.id("columns"),
+		title: v.string(),
+	},
+	handler: async (ctx, args) => {
+		await requireUser(ctx, args.sessionToken)
+		await ctx.db.patch(args.columnId, { title: args.title })
 	},
 })
 
@@ -100,9 +116,11 @@ export const update = mutation({
 	handler: async (ctx, args) => {
 		const userId = await requireUser(ctx, args.sessionToken)
 		await ctx.db.patch(args.issueId, {
-			...(args.title ? { title: args.title } : {}),
-			...(args.description ? { description: args.description } : {}),
-			...(args.assignee ? { assignee: args.assignee } : {}),
+			...(args.title !== undefined ? { title: args.title } : {}),
+			...(args.description !== undefined
+				? { description: args.description }
+				: {}),
+			...(args.assignee !== undefined ? { assignee: args.assignee } : {}),
 			updatedBy: userId,
 			updatedAt: Date.now(),
 		})
@@ -121,6 +139,29 @@ export const move = mutation({
 			statusId: args.statusId,
 			updatedBy: userId,
 			updatedAt: Date.now(),
+		})
+	},
+})
+
+export const addComment = mutation({
+	args: {
+		sessionToken: v.string(),
+		issueId: v.id("issues"),
+		body: v.string(),
+	},
+	handler: async (ctx, args) => {
+		const userId = await requireUser(ctx, args.sessionToken)
+		const user = await ctx.db.get(userId)
+		if (!user) {
+			throw new Error("User not found")
+		}
+
+		return await ctx.db.insert("comments", {
+			issueId: args.issueId,
+			body: args.body,
+			createdBy: userId,
+			authorUsername: user.username,
+			createdAt: Date.now(),
 		})
 	},
 })

@@ -54,6 +54,17 @@ export const logout = mutation({
 	},
 })
 
+export const listUsers = query({
+	args: {},
+	handler: async (ctx) => {
+		const users = await ctx.db.query("users").collect()
+		return users.map((user) => ({
+			_id: user._id,
+			username: user.username,
+		}))
+	},
+})
+
 export const getUserByUsername = internalQuery({
 	args: { username: v.string() },
 	handler: async (ctx, args) => {

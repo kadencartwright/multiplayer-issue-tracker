@@ -10,14 +10,33 @@ import {
 	Label,
 	Textarea,
 } from "@mit/ui"
-import { createFileRoute } from "@tanstack/react-router"
+import { createFileRoute, useNavigate } from "@tanstack/react-router"
 import { useAction, useMutation, useQuery } from "convex/react"
-import { ImageIcon, LogOut, Plus, Upload } from "lucide-react"
+import {
+	ImageIcon,
+	LogOut,
+	MessageSquare,
+	PanelTopOpen,
+	Plus,
+	Upload,
+	X,
+} from "lucide-react"
 import { type FormEvent, useEffect, useMemo, useState } from "react"
 import { api } from "../../convex/_generated/api"
 import type { Doc, Id } from "../../convex/_generated/dataModel"
 
-export const Route = createFileRoute("/")({ component: Home })
+type SearchState = {
+	issue?: string
+	create?: boolean
+}
+
+export const Route = createFileRoute("/")({
+	validateSearch: (search: Record<string, unknown>): SearchState => ({
+		issue: typeof search.issue === "string" ? search.issue : undefined,
+		create: search.create === true || search.create === "true" || undefined,
+	}),
+	component: Home,
+})
 
 type Session = {
 	token: string
@@ -26,33 +45,39 @@ type Session = {
 	}
 }
 
-type BoardData = {
-	columns: Array<Doc<"columns">>
-	issues: Array<Doc<"issues"> & { attachments: Array<Doc<"attachments">> }>
+type BoardIssue = Doc<"issues"> & {
+	attachments: Array<Doc<"attachments">>
+	comments: Array<Doc<"comments">>
 }
 
-function Home() {
-	const [session, setSession] = useState<Session | null>(() => {
-		if (typeof window === "undefined") {
-			return null
-		}
+type BoardData = {
+	columns: Array<Doc<"columns">>
+	issues: Array<BoardIssue>
+}
 
-		const stored = window.localStorage.getItem("mit.session")
-		return stored ? JSON.parse(stored) : null
-	})
+type UserOption = Pick<Doc<"users">, "_id" | "username">
+
+function Home() {
+	const [session, setSession] = useState<Session | null>(null)
 
 	const viewer = useQuery(api.auth.viewer, {
 		sessionToken: session?.token,
 	})
-
 	const logout = useMutation(api.auth.logout)
 
 	useEffect(() => {
-		if (session) {
-			window.localStorage.setItem("mit.session", JSON.stringify(session))
-		} else {
-			window.localStorage.removeItem("mit.session")
+		const stored = window.localStorage.getItem("mit.session")
+		if (stored) {
+			setSession(JSON.parse(stored))
 		}
+	}, [])
+
+	useEffect(() => {
+		if (!session) {
+			return
+		}
+
+		window.localStorage.setItem("mit.session", JSON.stringify(session))
 	}, [session])
 
 	if (!session || viewer === null) {
@@ -163,13 +188,19 @@ function Board({
 	username: string
 	onLogout: () => void
 }) {
+	const search = Route.useSearch()
+	const navigate = useNavigate({ from: "/" })
 	const board = useQuery(api.issues.list) as BoardData | undefined
+	const users = (useQuery(api.auth.listUsers) ?? []) as Array<UserOption>
 	const seedDefaults = useMutation(api.issues.seedDefaults)
 	const createIssue = useMutation(api.issues.create)
 	const createColumn = useMutation(api.issues.createColumn)
+	const renameColumn = useMutation(api.issues.renameColumn)
 	const moveIssue = useMutation(api.issues.move)
+	const updateIssue = useMutation(api.issues.update)
 	const addAttachment = useMutation(api.issues.addAttachment)
-	const [selectedStatus, setSelectedStatus] = useState<Id<"columns"> | null>(
+	const addComment = useMutation(api.issues.addComment)
+	const [draggedIssueId, setDraggedIssueId] = useState<Id<"issues"> | null>(
 		null,
 	)
 
@@ -177,224 +208,538 @@ function Board({
 		void seedDefaults()
 	}, [seedDefaults])
 
+	const selectedIssue = useMemo(
+		() => board?.issues.find((issue) => issue._id === search.issue),
+		[board?.issues, search.issue],
+	)
+
 	const firstColumn = board?.columns[0]?._id
-	const newIssueStatus = selectedStatus ?? firstColumn
 
-	async function submitIssue(event: FormEvent<HTMLFormElement>) {
-		event.preventDefault()
-		if (!newIssueStatus) {
-			return
-		}
+	function closeModal() {
+		void navigate({ search: {} })
+	}
 
-		const form = new FormData(event.currentTarget)
-		await createIssue({
-			sessionToken,
-			title: String(form.get("title") ?? ""),
-			description: String(form.get("description") ?? ""),
-			assignee: String(form.get("assignee") ?? "") || undefined,
-			statusId: newIssueStatus,
+	async function uploadImage(issueId: Id<"issues">, file: File) {
+		const upload = new FormData()
+		upload.set("file", file)
+		upload.set("issueId", issueId)
+		const response = await fetch("/api/upload", {
+			method: "POST",
+			body: upload,
 		})
-		event.currentTarget.reset()
+		if (!response.ok) {
+			throw new Error(await response.text())
+		}
+		const attachment = await response.json()
+		await addAttachment({
+			sessionToken,
+			issueId,
+			...attachment,
+		})
 	}
 
 	async function submitColumn(event: FormEvent<HTMLFormElement>) {
 		event.preventDefault()
 		const form = new FormData(event.currentTarget)
-		await createColumn({ sessionToken, title: String(form.get("title") ?? "") })
+		await createColumn({
+			sessionToken,
+			title: String(form.get("title") ?? ""),
+		})
 		event.currentTarget.reset()
 	}
 
 	return (
 		<main className="min-h-screen bg-zinc-100 text-zinc-950">
 			<header className="border-b border-zinc-200 bg-white">
-				<div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3">
+				<div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3">
 					<div>
 						<h1 className="text-lg font-semibold">Multiplayer Issue Tracker</h1>
 						<p className="text-sm text-zinc-500">Connected as {username}</p>
 					</div>
-					<Button variant="outline" onClick={onLogout}>
-						<LogOut className="size-4" />
-						Sign out
-					</Button>
+					<div className="flex items-center gap-2">
+						<Button
+							type="button"
+							onClick={() => navigate({ search: { create: true } })}
+						>
+							<Plus className="size-4" />
+							New issue
+						</Button>
+						<Button variant="outline" onClick={onLogout}>
+							<LogOut className="size-4" />
+							Sign out
+						</Button>
+					</div>
 				</div>
 			</header>
 
-			<div className="mx-auto grid max-w-7xl gap-4 px-4 py-4 lg:grid-cols-[320px_1fr]">
-				<aside className="space-y-4">
-					<Card>
-						<CardHeader>
-							<CardTitle>New issue</CardTitle>
-						</CardHeader>
-						<CardContent>
-							<form className="space-y-3" onSubmit={submitIssue}>
-								<Input name="title" placeholder="Title" required />
-								<Textarea name="description" placeholder="Description" />
-								<Input name="assignee" placeholder="Assignee" />
-								<select
-									className="h-9 w-full rounded-md border border-zinc-200 bg-white px-3 text-sm"
-									value={newIssueStatus ?? ""}
-									onChange={(event) =>
-										setSelectedStatus(event.target.value as Id<"columns">)
-									}
-								>
-									{board?.columns.map((column) => (
-										<option key={column._id} value={column._id}>
-											{column.title}
-										</option>
-									))}
-								</select>
-								<Button className="w-full" type="submit">
-									<Plus className="size-4" />
-									Create issue
-								</Button>
-							</form>
-						</CardContent>
-					</Card>
-
-					<Card>
-						<CardHeader>
-							<CardTitle>Add row</CardTitle>
-						</CardHeader>
-						<CardContent>
-							<form className="flex gap-2" onSubmit={submitColumn}>
-								<Input name="title" placeholder="Status name" required />
-								<Button size="icon" aria-label="Add status" type="submit">
-									<Plus className="size-4" />
-								</Button>
-							</form>
-						</CardContent>
-					</Card>
-				</aside>
+			<div className="mx-auto max-w-7xl px-4 py-4">
+				<form className="mb-4 flex max-w-md gap-2" onSubmit={submitColumn}>
+					<Input name="title" placeholder="Add custom column" required />
+					<Button type="submit" variant="secondary">
+						<PanelTopOpen className="size-4" />
+						Add column
+					</Button>
+				</form>
 
 				<section className="overflow-x-auto">
-					<div className="grid min-w-[960px] grid-cols-5 gap-3">
+					<div className="flex min-h-[70vh] gap-3">
 						{board?.columns.map((column) => {
 							const issues = board.issues.filter(
 								(issue) => issue.statusId === column._id,
 							)
 							return (
-								<div key={column._id} className="space-y-3">
-									<div className="flex items-center justify-between">
-										<h2 className="text-sm font-semibold">{column.title}</h2>
-										<Badge>{issues.length}</Badge>
-									</div>
-									<div className="space-y-3">
-										{issues.map((issue) => (
-											<IssueCard
-												key={issue._id}
-												issue={issue}
-												columns={board.columns}
-												onMove={(statusId) =>
-													moveIssue({
-														sessionToken,
-														issueId: issue._id,
-														statusId,
-													})
-												}
-												onAttach={async (file) => {
-													const upload = new FormData()
-													upload.set("file", file)
-													upload.set("issueId", issue._id)
-													const response = await fetch("/api/upload", {
-														method: "POST",
-														body: upload,
-													})
-													if (!response.ok) {
-														throw new Error(await response.text())
-													}
-													const attachment = await response.json()
-													await addAttachment({
-														sessionToken,
-														issueId: issue._id,
-														...attachment,
-													})
-												}}
-											/>
-										))}
-									</div>
-								</div>
+								<KanbanColumn
+									key={column._id}
+									column={column}
+									issues={issues}
+									draggedIssueId={draggedIssueId}
+									onDragStart={setDraggedIssueId}
+									onDropIssue={async (statusId) => {
+										if (!draggedIssueId) {
+											return
+										}
+										await moveIssue({
+											sessionToken,
+											issueId: draggedIssueId,
+											statusId,
+										})
+										setDraggedIssueId(null)
+									}}
+									onOpenIssue={(issueId) =>
+										navigate({ search: { issue: issueId } })
+									}
+									onRename={async (title) =>
+										renameColumn({
+											sessionToken,
+											columnId: column._id,
+											title,
+										})
+									}
+								/>
 							)
 						})}
 					</div>
 				</section>
 			</div>
+
+			{search.create && firstColumn ? (
+				<CreateIssueModal
+					columns={board?.columns ?? []}
+					users={users}
+					defaultStatusId={firstColumn}
+					onClose={closeModal}
+					onCreate={async (input) => {
+						const issueId = await createIssue({
+							sessionToken,
+							...input,
+						})
+						void navigate({ search: { issue: issueId } })
+					}}
+				/>
+			) : null}
+
+			{selectedIssue ? (
+				<IssueDetailModal
+					issue={selectedIssue}
+					users={users}
+					onClose={closeModal}
+					onUpdate={(input) =>
+						updateIssue({
+							sessionToken,
+							issueId: selectedIssue._id,
+							...input,
+						})
+					}
+					onUpload={(file) => uploadImage(selectedIssue._id, file)}
+					onComment={(body) =>
+						addComment({
+							sessionToken,
+							issueId: selectedIssue._id,
+							body,
+						})
+					}
+				/>
+			) : null}
 		</main>
+	)
+}
+
+function KanbanColumn({
+	column,
+	issues,
+	draggedIssueId,
+	onDragStart,
+	onDropIssue,
+	onOpenIssue,
+	onRename,
+}: {
+	column: Doc<"columns">
+	issues: Array<BoardIssue>
+	draggedIssueId: Id<"issues"> | null
+	onDragStart: (issueId: Id<"issues">) => void
+	onDropIssue: (statusId: Id<"columns">) => Promise<void>
+	onOpenIssue: (issueId: Id<"issues">) => void
+	onRename: (title: string) => Promise<unknown>
+}) {
+	const [title, setTitle] = useState(column.title)
+
+	useEffect(() => {
+		setTitle(column.title)
+	}, [column.title])
+
+	return (
+		<section
+			aria-label={`${column.title} column`}
+			className={cn(
+				"w-72 shrink-0 rounded-lg border border-zinc-200 bg-zinc-50 p-3",
+				draggedIssueId && "border-zinc-300 bg-white",
+			)}
+			onDragOver={(event) => event.preventDefault()}
+			onDrop={() => onDropIssue(column._id)}
+		>
+			<div className="mb-3 flex items-center gap-2">
+				<Input
+					className="h-8 border-transparent bg-transparent px-1 font-semibold focus-visible:bg-white"
+					value={title}
+					aria-label={`Rename ${column.title}`}
+					onChange={(event) => setTitle(event.target.value)}
+					onBlur={() => {
+						if (title.trim() && title !== column.title) {
+							void onRename(title.trim())
+						}
+					}}
+				/>
+				<Badge>{issues.length}</Badge>
+			</div>
+			<div className="space-y-3">
+				{issues.map((issue) => (
+					<IssueCard
+						key={issue._id}
+						issue={issue}
+						onOpen={() => onOpenIssue(issue._id)}
+						onDragStart={() => onDragStart(issue._id)}
+					/>
+				))}
+			</div>
+		</section>
 	)
 }
 
 function IssueCard({
 	issue,
-	columns,
-	onMove,
-	onAttach,
+	onOpen,
+	onDragStart,
 }: {
-	issue: Doc<"issues"> & { attachments: Array<Doc<"attachments">> }
-	columns: Array<Doc<"columns">>
-	onMove: (statusId: Id<"columns">) => Promise<unknown>
-	onAttach: (file: File) => Promise<void>
+	issue: BoardIssue
+	onOpen: () => void
+	onDragStart: () => void
 }) {
-	const [uploading, setUploading] = useState(false)
-	const attachmentCount = useMemo(
-		() => issue.attachments.length,
-		[issue.attachments],
-	)
-
 	return (
-		<Card className="rounded-md">
+		<Card
+			className="cursor-grab rounded-md active:cursor-grabbing"
+			draggable
+			onDragStart={(event) => {
+				event.dataTransfer.effectAllowed = "move"
+				event.dataTransfer.setData("text/plain", issue._id)
+				onDragStart()
+			}}
+			onClick={onOpen}
+			role="button"
+			tabIndex={0}
+			onKeyDown={(event) => {
+				if (event.key === "Enter" || event.key === " ") {
+					onOpen()
+				}
+			}}
+		>
 			<CardHeader className="p-3">
 				<CardTitle className="text-sm leading-snug">{issue.title}</CardTitle>
 				{issue.assignee ? <Badge>{issue.assignee}</Badge> : null}
 			</CardHeader>
 			<CardContent className="space-y-3 p-3 pt-0">
-				<p className="whitespace-pre-wrap text-sm text-zinc-600">
-					{issue.description}
+				<p className="line-clamp-3 whitespace-pre-wrap text-sm text-zinc-600">
+					{issue.description || "No description"}
 				</p>
-				<select
-					className="h-8 w-full rounded-md border border-zinc-200 bg-white px-2 text-xs"
-					value={issue.statusId}
-					onChange={(event) => onMove(event.target.value as Id<"columns">)}
-				>
-					{columns.map((column) => (
-						<option key={column._id} value={column._id}>
-							{column.title}
-						</option>
-					))}
-				</select>
-				<label
-					className={cn(
-						"flex h-9 cursor-pointer items-center justify-center gap-2 rounded-md border border-zinc-200 bg-white text-sm font-medium hover:bg-zinc-50",
-						uploading && "cursor-wait opacity-70",
-					)}
-				>
-					<Upload className="size-4" />
-					{uploading ? "Uploading" : "Attach image"}
-					<input
-						className="sr-only"
-						type="file"
-						accept="image/*"
-						disabled={uploading}
-						onChange={async (event) => {
-							const file = event.target.files?.[0]
-							if (!file) {
-								return
-							}
-							setUploading(true)
-							try {
-								await onAttach(file)
-							} finally {
-								setUploading(false)
-								event.target.value = ""
-							}
-						}}
-					/>
-				</label>
-				{attachmentCount > 0 ? (
-					<div className="flex items-center gap-2 text-xs text-zinc-500">
+				<div className="flex items-center gap-3 text-xs text-zinc-500">
+					<span className="flex items-center gap-1">
+						<MessageSquare className="size-3.5" />
+						{issue.comments.length}
+					</span>
+					<span className="flex items-center gap-1">
 						<ImageIcon className="size-3.5" />
-						{attachmentCount} image{attachmentCount === 1 ? "" : "s"}
-					</div>
-				) : null}
+						{issue.attachments.length}
+					</span>
+				</div>
 			</CardContent>
 		</Card>
+	)
+}
+
+function CreateIssueModal({
+	columns,
+	users,
+	defaultStatusId,
+	onClose,
+	onCreate,
+}: {
+	columns: Array<Doc<"columns">>
+	users: Array<UserOption>
+	defaultStatusId: Id<"columns">
+	onClose: () => void
+	onCreate: (input: {
+		title: string
+		description: string
+		statusId: Id<"columns">
+		assignee?: string
+	}) => Promise<void>
+}) {
+	const [statusId, setStatusId] = useState<Id<"columns">>(defaultStatusId)
+
+	async function submit(event: FormEvent<HTMLFormElement>) {
+		event.preventDefault()
+		const form = new FormData(event.currentTarget)
+		await onCreate({
+			title: String(form.get("title") ?? ""),
+			description: String(form.get("description") ?? ""),
+			assignee: String(form.get("assignee") ?? "") || undefined,
+			statusId,
+		})
+	}
+
+	return (
+		<Modal title="New issue" onClose={onClose}>
+			<form className="space-y-4" onSubmit={submit}>
+				<div className="space-y-2">
+					<Label htmlFor="new-title">Title</Label>
+					<Input id="new-title" name="title" required />
+				</div>
+				<div className="space-y-2">
+					<Label htmlFor="new-description">Description</Label>
+					<Textarea id="new-description" name="description" />
+				</div>
+				<div className="grid gap-3 sm:grid-cols-2">
+					<div className="space-y-2">
+						<Label htmlFor="new-assignee">Assignee</Label>
+						<AssigneeInput id="new-assignee" name="assignee" users={users} />
+					</div>
+					<div className="space-y-2">
+						<Label>Status</Label>
+						<div className="flex flex-wrap gap-2">
+							{columns.map((column) => (
+								<Button
+									key={column._id}
+									type="button"
+									size="sm"
+									variant={statusId === column._id ? "default" : "outline"}
+									onClick={() => setStatusId(column._id)}
+								>
+									{column.title}
+								</Button>
+							))}
+						</div>
+					</div>
+				</div>
+				<div className="flex justify-end gap-2">
+					<Button type="button" variant="ghost" onClick={onClose}>
+						Cancel
+					</Button>
+					<Button type="submit">Create issue</Button>
+				</div>
+			</form>
+		</Modal>
+	)
+}
+
+function IssueDetailModal({
+	issue,
+	users,
+	onClose,
+	onUpdate,
+	onUpload,
+	onComment,
+}: {
+	issue: BoardIssue
+	users: Array<UserOption>
+	onClose: () => void
+	onUpdate: (input: {
+		title?: string
+		description?: string
+		assignee?: string
+	}) => Promise<unknown>
+	onUpload: (file: File) => Promise<void>
+	onComment: (body: string) => Promise<unknown>
+}) {
+	const [uploading, setUploading] = useState(false)
+
+	async function submitDetails(event: FormEvent<HTMLFormElement>) {
+		event.preventDefault()
+		const form = new FormData(event.currentTarget)
+		await onUpdate({
+			title: String(form.get("title") ?? ""),
+			description: String(form.get("description") ?? ""),
+			assignee: String(form.get("assignee") ?? ""),
+		})
+	}
+
+	async function submitComment(event: FormEvent<HTMLFormElement>) {
+		event.preventDefault()
+		const form = new FormData(event.currentTarget)
+		const body = String(form.get("body") ?? "").trim()
+		if (!body) {
+			return
+		}
+		await onComment(body)
+		event.currentTarget.reset()
+	}
+
+	return (
+		<Modal title="Issue detail" onClose={onClose} wide>
+			<div className="grid gap-5 lg:grid-cols-[1fr_260px]">
+				<form className="space-y-4" onSubmit={submitDetails}>
+					<div className="space-y-2">
+						<Label htmlFor="detail-title">Title</Label>
+						<Input id="detail-title" name="title" defaultValue={issue.title} />
+					</div>
+					<div className="space-y-2">
+						<Label htmlFor="detail-description">Description</Label>
+						<Textarea
+							id="detail-description"
+							name="description"
+							defaultValue={issue.description}
+							className="min-h-36"
+						/>
+					</div>
+					<div className="space-y-2">
+						<Label htmlFor="detail-assignee">Assignee</Label>
+						<AssigneeInput
+							id="detail-assignee"
+							name="assignee"
+							users={users}
+							defaultValue={issue.assignee ?? ""}
+						/>
+					</div>
+					<Button type="submit">Save details</Button>
+				</form>
+
+				<aside className="space-y-4">
+					<div className="space-y-2">
+						<Label>Images</Label>
+						<label
+							className={cn(
+								"flex h-10 cursor-pointer items-center justify-center gap-2 rounded-md border border-zinc-200 bg-white text-sm font-medium hover:bg-zinc-50",
+								uploading && "cursor-wait opacity-70",
+							)}
+						>
+							<Upload className="size-4" />
+							{uploading ? "Uploading" : "Upload image"}
+							<input
+								className="sr-only"
+								type="file"
+								accept="image/*"
+								disabled={uploading}
+								onChange={async (event) => {
+									const file = event.target.files?.[0]
+									if (!file) {
+										return
+									}
+									setUploading(true)
+									try {
+										await onUpload(file)
+									} finally {
+										setUploading(false)
+										event.target.value = ""
+									}
+								}}
+							/>
+						</label>
+						<div className="space-y-2">
+							{issue.attachments.map((attachment) => (
+								<a
+									key={attachment._id}
+									className="block rounded-md border border-zinc-200 p-2 text-sm text-zinc-700 hover:bg-zinc-50"
+									href={attachment.url}
+									target="_blank"
+									rel="noreferrer"
+								>
+									{attachment.fileName}
+								</a>
+							))}
+						</div>
+					</div>
+				</aside>
+			</div>
+
+			<section className="mt-5 border-t border-zinc-200 pt-4">
+				<h3 className="mb-3 text-sm font-semibold">Comments</h3>
+				<div className="space-y-3">
+					{issue.comments.map((comment) => (
+						<div key={comment._id} className="rounded-md bg-zinc-50 p-3">
+							<div className="text-xs font-medium text-zinc-500">
+								{comment.authorUsername}
+							</div>
+							<p className="mt-1 whitespace-pre-wrap text-sm text-zinc-800">
+								{comment.body}
+							</p>
+						</div>
+					))}
+				</div>
+				<form className="mt-3 flex gap-2" onSubmit={submitComment}>
+					<Input name="body" placeholder="Add a comment" required />
+					<Button type="submit">Comment</Button>
+				</form>
+			</section>
+		</Modal>
+	)
+}
+
+function AssigneeInput({
+	users,
+	id,
+	...props
+}: React.InputHTMLAttributes<HTMLInputElement> & {
+	users: Array<UserOption>
+}) {
+	const listId = `${id}-users`
+	return (
+		<>
+			<Input id={id} list={listId} {...props} />
+			<datalist id={listId}>
+				{users.map((user) => (
+					<option key={user._id} value={user.username} />
+				))}
+			</datalist>
+		</>
+	)
+}
+
+function Modal({
+	title,
+	children,
+	onClose,
+	wide = false,
+}: {
+	title: string
+	children: React.ReactNode
+	onClose: () => void
+	wide?: boolean
+}) {
+	return (
+		<div className="fixed inset-0 z-50 grid place-items-center bg-black/35 p-4">
+			<div
+				className={cn(
+					"max-h-[90vh] w-full overflow-y-auto rounded-lg border border-zinc-200 bg-white shadow-xl",
+					wide ? "max-w-4xl" : "max-w-2xl",
+				)}
+			>
+				<div className="flex items-center justify-between border-b border-zinc-200 px-5 py-3">
+					<h2 className="font-semibold">{title}</h2>
+					<Button type="button" variant="ghost" size="icon" onClick={onClose}>
+						<X className="size-4" />
+						<span className="sr-only">Close</span>
+					</Button>
+				</div>
+				<div className="p-5">{children}</div>
+			</div>
+		</div>
 	)
 }
