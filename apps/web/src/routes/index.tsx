@@ -570,14 +570,22 @@ function IssueDetailModal({
 	onComment: (body: string) => Promise<unknown>
 }) {
 	const [uploading, setUploading] = useState(false)
+	const [title, setTitle] = useState(issue.title)
+	const [description, setDescription] = useState(issue.description)
+	const [assignee, setAssignee] = useState(issue.assignee ?? "")
+
+	useEffect(() => {
+		setTitle(issue.title)
+		setDescription(issue.description)
+		setAssignee(issue.assignee ?? "")
+	}, [issue.title, issue.description, issue.assignee])
 
 	async function submitDetails(event: FormEvent<HTMLFormElement>) {
 		event.preventDefault()
-		const form = new FormData(event.currentTarget)
 		await onUpdate({
-			title: String(form.get("title") ?? ""),
-			description: String(form.get("description") ?? ""),
-			assignee: String(form.get("assignee") ?? ""),
+			title,
+			description,
+			assignee,
 		})
 	}
 
@@ -598,14 +606,20 @@ function IssueDetailModal({
 				<form className="space-y-4" onSubmit={submitDetails}>
 					<div className="space-y-2">
 						<Label htmlFor="detail-title">Title</Label>
-						<Input id="detail-title" name="title" defaultValue={issue.title} />
+						<Input
+							id="detail-title"
+							name="title"
+							value={title}
+							onChange={(event) => setTitle(event.target.value)}
+						/>
 					</div>
 					<div className="space-y-2">
 						<Label htmlFor="detail-description">Description</Label>
 						<Textarea
 							id="detail-description"
 							name="description"
-							defaultValue={issue.description}
+							value={description}
+							onChange={(event) => setDescription(event.target.value)}
 							className="min-h-36"
 						/>
 					</div>
@@ -615,7 +629,8 @@ function IssueDetailModal({
 							id="detail-assignee"
 							name="assignee"
 							users={users}
-							defaultValue={issue.assignee ?? ""}
+							value={assignee}
+							onChange={(event) => setAssignee(event.target.value)}
 						/>
 					</div>
 					<Button type="submit">Save details</Button>
