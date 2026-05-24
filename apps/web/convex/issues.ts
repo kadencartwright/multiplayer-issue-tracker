@@ -10,6 +10,8 @@ const defaultColumns = [
 	"Done",
 ]
 
+const presenceTtlMs = 15_000
+
 export const seedDefaults = mutation({
 	args: {},
 	handler: async (ctx) => {
@@ -39,6 +41,10 @@ export const list = query({
 			.collect()
 		const attachments = await ctx.db.query("attachments").collect()
 		const comments = await ctx.db.query("comments").collect()
+		const activeSince = Date.now() - presenceTtlMs
+		const editingPresence = (
+			await ctx.db.query("editingPresence").collect()
+		).filter((presence) => presence.updatedAt >= activeSince)
 
 		return {
 			columns,
@@ -50,6 +56,9 @@ export const list = query({
 				comments: comments
 					.filter((comment) => comment.issueId === issue._id)
 					.sort((a, b) => a.createdAt - b.createdAt),
+				editingPresence: editingPresence.filter(
+					(presence) => presence.issueId === issue._id,
+				),
 			})),
 		}
 	},
@@ -189,5 +198,65 @@ export const addAttachment = mutation({
 			createdBy: userId,
 			createdAt: Date.now(),
 		})
+	},
+})
+
+export const heartbeatEditing = mutation({
+	args: {
+		sessionToken: v.string(),
+		issueId: v.id("issues"),
+		clientId: v.string(),
+		fields: v.array(v.string()),
+	},
+	handler: async (ctx, args) => {
+		const userId = await requireUser(ctx, args.sessionToken)
+		const user = await ctx.db.get(userId)
+		if (!user) {
+			throw new Error("User not found")
+		}
+
+		const existing = await ctx.db
+			.query("editingPresence")
+			.withIndex("by_client_issue", (q) =>
+				q.eq("clientId", args.clientId).eq("issueId", args.issueId),
+			)
+			.unique()
+
+		const presence = {
+			issueId: args.issueId,
+			clientId: args.clientId,
+			userId,
+			username: user.username,
+			fields: args.fields,
+			updatedAt: Date.now(),
+		}
+
+		if (existing) {
+			await ctx.db.patch(existing._id, presence)
+			return existing._id
+		}
+
+		return await ctx.db.insert("editingPresence", presence)
+	},
+})
+
+export const clearEditing = mutation({
+	args: {
+		sessionToken: v.string(),
+		issueId: v.id("issues"),
+		clientId: v.string(),
+	},
+	handler: async (ctx, args) => {
+		await requireUser(ctx, args.sessionToken)
+		const existing = await ctx.db
+			.query("editingPresence")
+			.withIndex("by_client_issue", (q) =>
+				q.eq("clientId", args.clientId).eq("issueId", args.issueId),
+			)
+			.unique()
+
+		if (existing) {
+			await ctx.db.delete(existing._id)
+		}
 	},
 })

@@ -17,11 +17,18 @@ import {
 	LogOut,
 	MessageSquare,
 	PanelTopOpen,
+	Pencil,
 	Plus,
 	Upload,
 	X,
 } from "lucide-react"
-import { type FormEvent, useEffect, useMemo, useState } from "react"
+import {
+	type FormEvent,
+	useCallback,
+	useEffect,
+	useMemo,
+	useState,
+} from "react"
 import { api } from "../../convex/_generated/api"
 import type { Doc, Id } from "../../convex/_generated/dataModel"
 
@@ -48,6 +55,7 @@ type Session = {
 type BoardIssue = Doc<"issues"> & {
 	attachments: Array<Doc<"attachments">>
 	comments: Array<Doc<"comments">>
+	editingPresence: Array<Doc<"editingPresence">>
 }
 
 type BoardData = {
@@ -200,13 +208,28 @@ function Board({
 	const updateIssue = useMutation(api.issues.update)
 	const addAttachment = useMutation(api.issues.addAttachment)
 	const addComment = useMutation(api.issues.addComment)
+	const heartbeatEditing = useMutation(api.issues.heartbeatEditing)
+	const clearEditing = useMutation(api.issues.clearEditing)
 	const [draggedIssueId, setDraggedIssueId] = useState<Id<"issues"> | null>(
 		null,
 	)
+	const [clientId, setClientId] = useState<string | null>(null)
 
 	useEffect(() => {
 		void seedDefaults()
 	}, [seedDefaults])
+
+	useEffect(() => {
+		const existing = window.sessionStorage.getItem("mit.clientId")
+		if (existing) {
+			setClientId(existing)
+			return
+		}
+
+		const next = crypto.randomUUID()
+		window.sessionStorage.setItem("mit.clientId", next)
+		setClientId(next)
+	}, [])
 
 	const selectedIssue = useMemo(
 		() => board?.issues.find((issue) => issue._id === search.issue),
@@ -214,6 +237,34 @@ function Board({
 	)
 
 	const firstColumn = board?.columns[0]?._id
+
+	const heartbeatSelectedIssue = useCallback(
+		(fields: Array<string>) => {
+			if (!clientId || !selectedIssue) {
+				return Promise.resolve(null)
+			}
+
+			return heartbeatEditing({
+				sessionToken,
+				issueId: selectedIssue._id,
+				clientId,
+				fields,
+			})
+		},
+		[clientId, heartbeatEditing, selectedIssue, sessionToken],
+	)
+
+	const clearSelectedIssueEditing = useCallback(() => {
+		if (!clientId || !selectedIssue) {
+			return Promise.resolve(null)
+		}
+
+		return clearEditing({
+			sessionToken,
+			issueId: selectedIssue._id,
+			clientId,
+		})
+	}, [clearEditing, clientId, selectedIssue, sessionToken])
 
 	function closeModal() {
 		void navigate({ search: {} })
@@ -342,6 +393,7 @@ function Board({
 				<IssueDetailModal
 					issue={selectedIssue}
 					users={users}
+					clientId={clientId}
 					onClose={closeModal}
 					onUpdate={(input) =>
 						updateIssue({
@@ -358,6 +410,8 @@ function Board({
 							body,
 						})
 					}
+					onHeartbeat={heartbeatSelectedIssue}
+					onClearEditing={clearSelectedIssueEditing}
 				/>
 			) : null}
 		</main>
@@ -460,6 +514,12 @@ function IssueCard({
 				<p className="line-clamp-3 whitespace-pre-wrap text-sm text-zinc-600">
 					{issue.description || "No description"}
 				</p>
+				{issue.editingPresence.length > 0 ? (
+					<Badge className="border-amber-200 bg-amber-50 text-amber-800">
+						<Pencil className="size-3" />
+						{issue.editingPresence.length} editing
+					</Badge>
+				) : null}
 				<div className="flex items-center gap-3 text-xs text-zinc-500">
 					<span className="flex items-center gap-1">
 						<MessageSquare className="size-3.5" />
@@ -553,13 +613,17 @@ function CreateIssueModal({
 function IssueDetailModal({
 	issue,
 	users,
+	clientId,
 	onClose,
 	onUpdate,
 	onUpload,
 	onComment,
+	onHeartbeat,
+	onClearEditing,
 }: {
 	issue: BoardIssue
 	users: Array<UserOption>
+	clientId: string | null
 	onClose: () => void
 	onUpdate: (input: {
 		title?: string
@@ -568,17 +632,55 @@ function IssueDetailModal({
 	}) => Promise<unknown>
 	onUpload: (file: File) => Promise<void>
 	onComment: (body: string) => Promise<unknown>
+	onHeartbeat: (fields: Array<string>) => Promise<unknown>
+	onClearEditing: () => Promise<unknown>
 }) {
 	const [uploading, setUploading] = useState(false)
 	const [title, setTitle] = useState(issue.title)
 	const [description, setDescription] = useState(issue.description)
 	const [assignee, setAssignee] = useState(issue.assignee ?? "")
+	const [isEditing, setIsEditing] = useState(false)
+	const [hasRemoteUpdate, setHasRemoteUpdate] = useState(false)
+
+	const otherEditors = issue.editingPresence.filter(
+		(presence) => presence.clientId !== clientId,
+	)
 
 	useEffect(() => {
+		if (isEditing) {
+			setHasRemoteUpdate(true)
+			return
+		}
+
 		setTitle(issue.title)
 		setDescription(issue.description)
 		setAssignee(issue.assignee ?? "")
-	}, [issue.title, issue.description, issue.assignee])
+		setHasRemoteUpdate(false)
+	}, [issue.title, issue.description, issue.assignee, isEditing])
+
+	useEffect(() => {
+		if (!isEditing) {
+			return
+		}
+
+		const fields = ["title", "description", "assignee"]
+		void onHeartbeat(fields)
+		const intervalId = window.setInterval(() => {
+			void onHeartbeat(fields)
+		}, 5_000)
+
+		return () => window.clearInterval(intervalId)
+	}, [isEditing, onHeartbeat])
+
+	useEffect(() => {
+		return () => {
+			void onClearEditing()
+		}
+	}, [onClearEditing])
+
+	function markEditing() {
+		setIsEditing(true)
+	}
 
 	async function submitDetails(event: FormEvent<HTMLFormElement>) {
 		event.preventDefault()
@@ -587,6 +689,9 @@ function IssueDetailModal({
 			description,
 			assignee,
 		})
+		setIsEditing(false)
+		setHasRemoteUpdate(false)
+		await onClearEditing()
 	}
 
 	async function submitComment(event: FormEvent<HTMLFormElement>) {
@@ -602,6 +707,19 @@ function IssueDetailModal({
 
 	return (
 		<Modal title="Issue detail" onClose={onClose} wide>
+			{otherEditors.length > 0 ? (
+				<div className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+					{otherEditors.length} active editor
+					{otherEditors.length === 1 ? "" : "s"}:{" "}
+					{otherEditors.map((editor) => editor.username).join(", ")}
+				</div>
+			) : null}
+			{hasRemoteUpdate ? (
+				<div className="mb-4 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-900">
+					This issue changed in another tab while you are editing. Save to keep
+					your draft, or close and reopen to load the latest version.
+				</div>
+			) : null}
 			<div className="grid gap-5 lg:grid-cols-[1fr_260px]">
 				<form className="space-y-4" onSubmit={submitDetails}>
 					<div className="space-y-2">
@@ -610,7 +728,11 @@ function IssueDetailModal({
 							id="detail-title"
 							name="title"
 							value={title}
-							onChange={(event) => setTitle(event.target.value)}
+							onFocus={markEditing}
+							onChange={(event) => {
+								markEditing()
+								setTitle(event.target.value)
+							}}
 						/>
 					</div>
 					<div className="space-y-2">
@@ -619,7 +741,11 @@ function IssueDetailModal({
 							id="detail-description"
 							name="description"
 							value={description}
-							onChange={(event) => setDescription(event.target.value)}
+							onFocus={markEditing}
+							onChange={(event) => {
+								markEditing()
+								setDescription(event.target.value)
+							}}
 							className="min-h-36"
 						/>
 					</div>
@@ -630,7 +756,11 @@ function IssueDetailModal({
 							name="assignee"
 							users={users}
 							value={assignee}
-							onChange={(event) => setAssignee(event.target.value)}
+							onFocus={markEditing}
+							onChange={(event) => {
+								markEditing()
+								setAssignee(event.target.value)
+							}}
 						/>
 					</div>
 					<Button type="submit">Save details</Button>
@@ -672,7 +802,7 @@ function IssueDetailModal({
 								<a
 									key={attachment._id}
 									className="block rounded-md border border-zinc-200 p-2 text-sm text-zinc-700 hover:bg-zinc-50"
-									href={attachment.url}
+									href={`/api/object?key=${encodeURIComponent(attachment.key)}`}
 									target="_blank"
 									rel="noreferrer"
 								>

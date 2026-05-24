@@ -48,4 +48,14 @@ export default defineSchema({
 		authorUsername: v.string(),
 		createdAt: v.number(),
 	}).index("by_issue", ["issueId"]),
+	editingPresence: defineTable({
+		issueId: v.id("issues"),
+		clientId: v.string(),
+		userId: v.id("users"),
+		username: v.string(),
+		fields: v.array(v.string()),
+		updatedAt: v.number(),
+	})
+		.index("by_issue", ["issueId"])
+		.index("by_client_issue", ["clientId", "issueId"]),
 })

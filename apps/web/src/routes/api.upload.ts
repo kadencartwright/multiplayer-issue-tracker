@@ -64,7 +64,7 @@ export const Route = createFileRoute("/api/upload")({
 					fileName: file.name,
 					contentType: file.type,
 					size: file.size,
-					url: `${endpoint}/${bucket}/${key}`,
+					url: `/api/object?key=${encodeURIComponent(key)}`,
 				})
 			},
 		},
